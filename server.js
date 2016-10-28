@@ -4,6 +4,8 @@ const express = require('express')
 const Slapp = require('slapp')
 const ConvoStore = require('slapp-convo-beepboop')
 const Context = require('slapp-context-beepboop')
+const kv = require('beepboop-persist')( { provider: process.env.PERSIST_PROVIDER || 'beepboop' })
+const jsonParser = require('body-parser').json()
 
 // use `PORT` env var on Beep Boop - default to 3000 locally
 var port = process.env.PORT || 3000
@@ -16,105 +18,227 @@ var slapp = Slapp({
 })
 
 
-var HELP_TEXT = `
-I will respond to the following messages:
-\`help\` - to see this message.
-\`hi\` - to demonstrate a conversation that tracks state.
-\`thanks\` - to demonstrate a simple response.
-\`<type-any-other-text>\` - to demonstrate a random emoticon response, some of the time :wink:.
-\`attachment\` - to see a Slack attachment message.
-`
+slapp.message('^link (.*)', ['direct_message', 'direct_mention'], (msg, text, repoFullname) => {
+  repoFullname = repoFullname && repoFullname.trim()
+  let key = channelKey(msg)
 
-//*********************************************
-// Setup different handlers for messages
-//*********************************************
-
-// response to the user typing "help"
-slapp.message('help', ['mention', 'direct_message'], (msg) => {
-  msg.say(HELP_TEXT)
-})
-
-// "Conversation" flow that tracks state - kicks off when user says hi, hello or hey
-slapp
-  .message('^(hi|hello|hey)$', ['direct_mention', 'direct_message'], (msg, text) => {
-    msg
-      .say(`${text}, how are you?`)
-      // sends next event from user to this route, passing along state
-      .route('how-are-you', { greeting: text })
-  })
-  .route('how-are-you', (msg, state) => {
-    var text = (msg.body.event && msg.body.event.text) || ''
-
-    // user may not have typed text as their next action, ask again and re-route
-    if (!text) {
-      return msg
-        .say("Whoops, I'm still waiting to hear how you're doing.")
-        .say('How are you?')
-        .route('how-are-you', state)
+  // channelKey ==> repo
+  kv.get(key, (err, list) => {
+    if (err) return msg.say(`😱 ${err}`)
+    list = list || []
+    if (list.indexOf(repoFullname) < 0) {
+      list.push(repoFullname)
     }
-
-    // add their response to state
-    state.status = text
-
-    msg
-      .say(`Ok then. What's your favorite color?`)
-      .route('color', state)
+    kv.set(channelKey(msg), list, (err) => {
+      if (err) return msg.say(`😱 ${err}`)
+    })
   })
-  .route('color', (msg, state) => {
-    var text = (msg.body.event && msg.body.event.text) || ''
 
-    // user may not have typed text as their next action, ask again and re-route
-    if (!text) {
-      return msg
-        .say("I'm eagerly awaiting to hear your favorite color.")
-        .route('color', state)
+  // repo ==> channelKey
+  kv.get(repoFullname, (err, list) => {
+    if (err) return msg.say(`😱 ${err}`)
+    list = list || []
+    if (list.indexOf(key) < 0) {
+      list.push(msg.meta)
     }
-
-    // add their response to state
-    state.color = text
-
-    msg
-      .say('Thanks for sharing.')
-      .say(`Here's what you've told me so far: \`\`\`${JSON.stringify(state)}\`\`\``)
-    // At this point, since we don't route anywhere, the "conversation" is over
+    kv.set(repoFullname, list, (err) => {
+      if (err) return msg.say(`😱 ${err}`)
+    })
   })
 
-// Can use a regex as well
-slapp.message(/^(thanks|thank you)/i, ['mention', 'direct_message'], (msg) => {
-  // You can provide a list of responses, and a random one will be chosen
-  // You can also include slack emoji in your responses
-  msg.say([
-    "You're welcome :smile:",
-    'You bet',
-    ':+1: Of course',
-    'Anytime :sun_with_face: :full_moon_with_face:'
-  ])
 })
 
-// demonstrate returning an attachment...
-slapp.message('attachment', ['mention', 'direct_message'], (msg) => {
-  msg.say({
-    text: 'Check out this amazing attachment! :confetti_ball: ',
-    attachments: [{
-      text: 'Slapp is a robust open source library that sits on top of the Slack APIs',
-      title: 'Slapp Library - Open Source',
-      image_url: 'https://storage.googleapis.com/beepboophq/_assets/bot-1.22f6fb.png',
-      title_link: 'https://beepboophq.com/',
-      color: '#7CD197'
-    }]
+slapp.message('^unlink (.*)', ['direct_message', 'direct_mention'], (msg, text, repoFullname) => {
+  repoFullname = repoFullname && repoFullname.trim()
+  let key = channelKey(msg)
+
+
+  // channelKey ==> repo
+  kv.get(key, (err, list) => {
+    if (err) return msg.say(`😱 ${err}`)
+    list = list || []
+    let i = list.indexOf(repoFullname)
+    if (i < 0) {
+      return msg.say(`${repoFullname} not linked`)
+    } else if (i === 0) {
+      list.pop()
+    } else {
+      list = list.splice(i, 1)
+    }
+    kv.set(key, list, (err) => {
+      if (err) return msg.say(`😱 ${err}`)
+    })
+  })
+
+  // repo ==> channelKey
+  kv.get(repoFullname, (err, list) => {
+    if (err) return msg.say(`😱 ${err}`)
+    list = list || []
+    let i = list.indexOf(key)
+    if (i < 0) {
+      return
+    } else if (i === 0) {
+      list.pop()
+    } else {
+      list = list.splice(i, 1)
+    }
+    kv.set(repoFullname, list, (err) => {
+      if (err) return msg.say(`😱 ${err}`)
+    })
+  })
+
+})
+
+slapp.message('^links', ['direct_message', 'direct_mention'], (msg) => {
+  kv.get(channelKey(msg), (err, list) => {
+    if (err) return msg.say(`😱 ${err}`)
+    list = list || []
+    msg.say(`${list.length} link${list.length > 1 ? 's' : ''} ${list.map((it) =>  `\`${it}\``).join(',')}`)
   })
 })
 
-// Catch-all for any other responses not handled above
-slapp.message('.*', ['direct_mention', 'direct_message'], (msg) => {
-  // respond only 40% of the time
-  if (Math.random() < 0.4) {
-    msg.say([':wave:', ':pray:', ':raised_hands:'])
+slapp.use((msg, next) => {
+  if (msg.body.event.type === 'message' && !msg.body.event.bot_id ) {
+
   }
 })
 
+function channelKey(msg) {
+  return `${msg.meta.team_id}-${msg.meta.channel_id}`
+}
+
+
 // attach Slapp to express server
 var server = slapp.attachToExpress(express())
+
+server.post('/webhook', jsonParser, (req, res) => {
+  // console.log('GITHUB webhook', req.body)
+  let notification = getNotification(req.body)
+  if (!notification) {
+    return console.log('Ignoring unsupported Github Webhook type')
+  }
+
+  sendNotificaiton(req.body.repository.full_name, notification)
+  res.send(200)
+})
+
+function getNotification(body) {
+  if (body.issue && body.comment) {
+    return {
+      short: `∆ <${body.comment.html_url}|comment> ${body.action} by <https://github.com/${body.issue.user.login}|${body.issue.user.login}> • ${trimComment(body.comment.body, 25)}`,
+      long: {
+        text: `<${body.comment.html_url}|comment> ${body.action} by <https://github.com/${body.issue.user.login}|${body.issue.user.login}>:\n${body.comment.body}`,
+        username: body.repository.full_name,
+        icon_url: 'https://assets-cdn.github.com/images/modules/logos_page/GitHub-Mark.png',
+        as_user: false,
+        markdwn: true
+      }
+    }
+  }
+  if (body.issue) {
+    return {
+      short: `∆ ${body.issue.user.login} ${body.action} issue on ${body.issue.title.substring(0, 25)}`,
+      long: {
+        text: `${body.issue.user.login} ${body.action} issue on <${body.issue.html_url}|${body.issue.title}>:\n${body.issue.body}`,
+        username: body.repository.full_name,
+        icon_url: 'https://assets-cdn.github.com/images/modules/logos_page/GitHub-Mark.png',
+        as_user: false
+      }
+    }
+  } else {
+    null
+  }
+}
+
+function sendNotificaiton(repo, payload) {
+  kv.get(repo, (err, list) => {
+    if (err) return console.log('Error geting repo from webhook', err)
+    list = list || []
+    list.forEach((meta) => {
+      getRecentMessages(meta.team_id, meta.channel_id, repo, (err, recentMessage) => {
+        if (err) return console.log('Error getRecentMessages', err)
+        if (recentMessage && recentMessage.messages.length) {
+          console.log('FOUND recentMessage!')
+          // update existing message and digest
+          recentMessage.messages.push(payload)
+          let attachments = []
+          recentMessage.messages.forEach((message) => {
+            attachments.push({ text: message.short, mrkdwn_in: ['text'] })
+          })
+          let updatePayload = {
+            ts: recentMessage.ts,
+            token: meta.bot_token,
+            channel: meta.channel_id,
+            username: repo,
+            icon_url: 'https://assets-cdn.github.com/images/modules/logos_page/GitHub-Mark.png',
+            as_user: false,
+            text: '',
+            mrkdwn: true,
+            attachments: attachments
+          }
+          console.log(updatePayload)
+          slapp.client.chat.update(updatePayload, (err, result) => {
+            if (err) return console.log(err)
+            putMessage(meta.team_id, meta.channel_id, repo, recentMessage)
+          })
+        } else {
+          // send new message
+          let copy = Object.assign({ token:  meta.bot_token, channel: meta.channel_id, mrkdwn: true }, payload.long);
+          slapp.client.chat.postMessage(copy, (err, result) => {
+            if (err) return console.log(err)
+            putMessage(meta.team_id, meta.channel_id, repo, {
+              ts: result.ts,
+              messages: [payload]
+            })
+          })
+        }
+      })
+    })
+  })
+}
+
+// {
+//   team,
+//   channel,
+//   ts,
+//   messages
+// }
+
+//
+// Recent Message storage
+//
+const RECENT_TIMEOUT_MS = 30000
+var timeouts = {}
+
+// by channelKey
+var messages = {}
+
+function getRecentMessages(team, channel, repo, callback) {
+  let key = `${team}~${channel}~${repo}`
+  callback(null, messages[key])
+}
+
+function putMessage(team, channel, repo, recentMessage) {
+  let key = `${team}~${channel}~${repo}`
+  if (timeouts[key]) {
+    clearTimeout(timeouts[key])
+    delete timeouts[key]
+  }
+  messages[key] = recentMessage
+  timeouts[key] = setTimeout(() => {
+    delete timeouts[key]
+    delete messages[key]
+  }, RECENT_TIMEOUT_MS)
+}
+
+function trimComment(body, max) {
+  body = body.replace(/\n/g, ' ').replace(/\s\s+/g, ' ')
+  if (body.length > max) {
+    body = body.substring(0, max) + '…'
+  }
+  return body
+}
+
 
 // start http server
 server.listen(port, (err) => {
